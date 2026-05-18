@@ -15,7 +15,7 @@
 ## Commit A — Scaffolding (no-op when disabled)
 
 ```
-lmkd: introduce optional ML predictor scaffolding (no-op when disabled)
+lmkd: optional ML predictor scaffolding (no-op when disabled)
 
 Adds ml_predictor.{h,cpp} containing PSIPredictor, an ONNX-Runtime
 backed rolling-window PSI -> kill-probability classifier, plus a
@@ -88,7 +88,7 @@ Change-Id: I<gerrit-hook-generated>
 ## Commit C — Runtime toggle + bench logging
 
 ```
-lmkd: add persist.lmk.use_ml_predictor runtime toggle and bench logging
+lmkd: add persist.lmk.use_ml_predictor toggle and bench logging
 
 Exposes the ML predictor through four Android system properties so
 the same lmkd binary can be A/B compared on the same device without
