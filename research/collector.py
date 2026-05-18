@@ -14,8 +14,8 @@ two artifacts:
      <out>.kills.log. Feed both to `label.py` to populate kill_event labels.
 
 This collector intentionally does NOT label rows in real time — labels need
-a future-window lookup (T_k - 200ms .. T_k - 100ms) which is cleaner as a
-post-pass.
+a future-window lookup [T_k - 300ms, T_k - 200ms] (lead=200ms, window=100ms;
+see label.py and README) which is cleaner as a post-pass.
 
 Design note: per-sample `adb shell` invocations cost ~30–60 ms of round-trip
 overhead each, which would skew a 100 ms cadence (see plan-executable.md
@@ -108,13 +108,17 @@ class CollectorState:
 
 
 # --- On-device shell loop ------------------------------------------------------
-# Prints a framed record every ~100ms with the device's wall-clock epoch and
-# the raw contents of /proc/pressure/memory and the three meminfo lines we
-# care about. Kept short — single quotes on the host side, double on device.
+# Prints a framed record every ~100ms with the raw contents of
+# /proc/pressure/memory and the three meminfo lines we care about.
+# Note: we deliberately do NOT emit a device-side timestamp here. Toybox
+# `date +%s.%N` on Android often returns `%N` literally (no nanosecond
+# support), corrupting parse_record. Instead, the host stamps the record
+# with time.time() when it consumes REC_BEGIN. Precision tradeoff: host
+# clock is ≤1ms but ignores device→adb roundtrip jitter (sub-ms in
+# practice; bounded by adb's stdout buffer flush, typically <5ms).
 ON_DEVICE_LOOP = (
     "while true; do "
     f"  echo {REC_BEGIN}; "
-    "  date +%s.%N; "
     "  cat /proc/pressure/memory; "
     "  grep -E '^(MemAvailable|SwapFree|SwapTotal):' /proc/meminfo; "
     f"  echo {REC_END}; "
@@ -137,7 +141,7 @@ def spawn_sampler(device: Optional[str]) -> subprocess.Popen[str]:
     return subprocess.Popen(
         adb_argv(device, "shell", ON_DEVICE_LOOP),
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
     )
@@ -149,26 +153,34 @@ def spawn_logcat(device: Optional[str]) -> subprocess.Popen[str]:
     return subprocess.Popen(
         adb_argv(device, "logcat", "-b", "main", "-s", "lmkd:I", "-v", "epoch", "-T", "1"),
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
     )
 
 
-def parse_record(block: list[str]) -> Optional[dict[str, float | int | str]]:
-    """Parse a single framed record into a CSV-ready row dict."""
-    if len(block) < 4:
-        return None
+def _parse_kb(val: str) -> int | str:
+    """Parse a meminfo value like ' 12345 kB' into an int; '' on failure."""
+    token = val.strip().split()[0] if val.strip() else ""
     try:
-        ts = float(block[0].strip())
+        return int(token)
     except ValueError:
+        return ""
+
+
+def parse_record(block: list[str], ts: float) -> Optional[dict[str, float | int | str]]:
+    """Parse a single framed record into a CSV-ready row dict.
+
+    `ts` is the host-stamped Unix epoch captured when REC_BEGIN was consumed.
+    """
+    if len(block) < 3:
         return None
 
     row: dict[str, float | int | str] = {c: "" for c in CSV_COLUMNS}
     row["timestamp_unix"] = ts
     row["kill_event"] = 0
 
-    for line in block[1:]:
+    for line in block:
         m = PSI_RE.match(line.strip())
         if m:
             prefix = m.group(1)  # "some" or "full"
@@ -179,13 +191,12 @@ def parse_record(block: list[str]) -> Optional[dict[str, float | int | str]]:
             continue
         if ":" in line:
             key, _, val = line.partition(":")
-            val_kb = val.strip().split()[0] if val.strip() else ""
             if key == "MemAvailable":
-                row["mem_available_kb"] = val_kb
+                row["mem_available_kb"] = _parse_kb(val)
             elif key == "SwapFree":
-                row["swap_free_kb"] = val_kb
+                row["swap_free_kb"] = _parse_kb(val)
             elif key == "SwapTotal":
-                row["swap_total_kb"] = val_kb
+                row["swap_total_kb"] = _parse_kb(val)
     return row
 
 
@@ -194,20 +205,27 @@ def sampler_thread(proc: subprocess.Popen[str], state: CollectorState) -> None:
     assert proc.stdout is not None
     block: list[str] = []
     in_record = False
+    rec_ts: float = 0.0
     for line in proc.stdout:
         if state.stop.is_set():
             break
         line = line.rstrip("\r\n")
         if line == REC_BEGIN:
+            # Host-side timestamp: precision ≤1ms, ignores sub-roundtrip
+            # device jitter. Captured at REC_BEGIN arrival so it reflects
+            # when the device flushed the sample, not when we finish parsing.
+            rec_ts = time.time()
             block = []
             in_record = True
             continue
         if line == REC_END and in_record:
             in_record = False
-            row = parse_record(block)
+            row = parse_record(block, rec_ts)
             if row is not None:
                 row["scenario"] = state.scenario
                 with state.lock:
+                    if state.stop.is_set():
+                        break
                     state.csv_writer.writerow([row[c] for c in CSV_COLUMNS])
                     state.rows_written += 1
             continue
@@ -251,6 +269,17 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _terminate(proc: subprocess.Popen[str]) -> None:
+    """Best-effort terminate then kill a subprocess."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
 def main() -> int:
     args = parse_args()
     preflight(args.device)
@@ -259,6 +288,7 @@ def main() -> int:
 
     sampler = spawn_sampler(args.device)
     logcat = spawn_logcat(args.device)
+    exit_code = 0
 
     try:
         with args.out.open("w", newline="") as csv_fp, kill_log_path.open("w") as kill_fp:
@@ -268,40 +298,58 @@ def main() -> int:
 
             t_samp = threading.Thread(target=sampler_thread, args=(sampler, state), daemon=True)
             t_log = threading.Thread(target=logcat_thread, args=(logcat, state), daemon=True)
-            t_samp.start()
-            t_log.start()
 
+            # Install SIGINT handler BEFORE starting threads so a fast Ctrl-C
+            # during thread spin-up still sets state.stop instead of killing
+            # the process and leaking subprocesses + truncating the CSV.
             def _handle_sigint(_signum: int, _frame: object) -> None:
                 state.stop.set()
 
             signal.signal(signal.SIGINT, _handle_sigint)
 
-            deadline = time.monotonic() + args.duration
-            startup = time.monotonic() + 5.0
-            while time.monotonic() < deadline and not state.stop.is_set():
-                time.sleep(0.5)
-                if time.monotonic() > startup and state.rows_written == 0:
-                    sys.stderr.write("error: no samples after 5s — shell wedged\n")
-                    state.stop.set()
-                    return 2
+            t_samp.start()
+            t_log.start()
 
-            state.stop.set()
-            csv_fp.flush()
-            kill_fp.flush()
-            sys.stderr.write(
-                f"collector: rows={state.rows_written} kills={state.kills_seen}\n"
-            )
+            try:
+                deadline = time.monotonic() + args.duration
+                startup = time.monotonic() + 5.0
+                while time.monotonic() < deadline and not state.stop.is_set():
+                    time.sleep(0.5)
+                    if time.monotonic() > startup and state.rows_written == 0:
+                        sys.stderr.write("error: no samples after 5s — shell wedged\n")
+                        state.stop.set()
+                        exit_code = 2
+                        break
+            finally:
+                # Stop the writer threads and JOIN them while the file is
+                # still open — otherwise the `with` exits, csv_fp closes,
+                # and any mid-flight writerow raises ValueError("I/O on
+                # closed file") with silent row loss. Terminating the
+                # subprocesses first guarantees the readers see EOF and
+                # exit their `for line in proc.stdout` loops promptly.
+                state.stop.set()
+                for proc in (sampler, logcat):
+                    _terminate(proc)
+                t_samp.join(timeout=2.0)
+                t_log.join(timeout=2.0)
+                try:
+                    csv_fp.flush()
+                    kill_fp.flush()
+                except ValueError:
+                    pass
+                sys.stderr.write(
+                    f"collector: rows={state.rows_written} kills={state.kills_seen}\n"
+                )
     except OSError as e:
         sys.stderr.write(f"error: CSV write failed: {e}\n")
         return 3
     finally:
+        # Defensive: if we bailed before the inner finally (e.g. OSError on
+        # open), the subprocesses are still alive. Idempotent terminate.
         for proc in (sampler, logcat):
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-    return 0
+            if proc.poll() is None:
+                _terminate(proc)
+    return exit_code
 
 
 if __name__ == "__main__":
