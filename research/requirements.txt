@@ -1,0 +1,5 @@
+# collector.py and label.py use stdlib only — no install required for them.
+# The EDA notebook (eda.ipynb) uses pandas + matplotlib for convenience.
+pandas>=2.0
+matplotlib>=3.7
+jupyter>=1.0
