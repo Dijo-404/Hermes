@@ -11,9 +11,28 @@ labeled CSVs for training the PSI predictor.
 | `collector.py` | Persistent-ADB-shell sampler; writes a raw CSV + a `.kills.log` side-channel. |
 | `label.py` | Post-pass labeler: sets `kill_event=1` on rows in the `[T_k - 300ms, T_k - 200ms]` window (defaults). |
 | `eda.ipynb` | Sanity-check notebook: class balance, distributions, positive-fraction assertion. |
-| `requirements.txt` | EDA notebook deps (pandas, matplotlib). Scripts are stdlib-only. |
+| `model.py` | Phase 3 — `PSIPredictor` LSTM (6 in → 32 hidden → 1 out, ≤200K params). |
+| `dataset.py` | Phase 3 — rolling-window `Dataset`; z-score stats serialised for C++ reuse. |
+| `train.py` | Phase 3 — leave-one-scenario-out training + lead-time histogram; emits `psi_predictor.pt`, `normalization.json`, `loso_metrics.csv`, `lead_time_histogram.csv`, filled `model_card.md`. Run with `--quick` for the smoke-test. |
+| `export_onnx.py` | Phase 3 — exports the `.pt` checkpoint to ONNX opset 11 with dynamic batch, validates against onnxruntime to within 1e-5. |
+| `bench_onnx.py` | Phase 3 — single-sample latency micro-benchmark for the ≤ 2 ms ARM64 p99 budget. |
+| `model_card.md` | Template the training script fills in (arch, param count, data sha256, git commit, LOSO metrics, lead histogram). |
+| `requirements.txt` | EDA notebook deps + Phase 3 model deps (torch, onnx, onnxruntime, numpy). |
 | `notes/` | Phase 1 call-graph and epoll-wiring notes. |
 | `data/` | Generated CSVs (gitignored if you choose; not auto-created). |
+
+## Phase 3 — training pipeline (one-paragraph tour)
+
+After Phase 2 has produced one or more labeled CSVs, train with
+`python train.py --data data/all.labeled.csv --out-dir out/`. The script
+runs leave-one-scenario-out cross-validation (one fold per scenario in the
+CSV), trains a final model on all scenarios, asserts the parameter count
+is ≤ 200,000, and writes the checkpoint plus normalization sidecar.
+Convert to ONNX with `python export_onnx.py --ckpt out/psi_predictor.pt
+--out out/psi_predictor.onnx` (asserts ≤ 1e-5 max-diff vs onnxruntime over
+100 random windows). Benchmark on the target device with
+`python bench_onnx.py --onnx out/psi_predictor.onnx`. Add `--quick` to
+`train.py` for the Phase 3 smoke-test (2 epochs, first two scenarios only).
 
 ## Install
 
