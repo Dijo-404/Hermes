@@ -1,0 +1,25 @@
+# Research artifacts — fork-only, never pushed upstream.
+# See research/upstream/gerrit-howto.md § "What NOT to push".
+
+# Raw and labeled PSI/meminfo/foreground-RSS captures from collector.py
+# and label.py. Device-specific and (in some scenarios) personally
+# identifiable; large.
+data/
+
+# A/B benchmark outputs from bench/ab.sh + aggregate.py + analyze.py.
+results/
+
+# Training run directories (checkpoints, tensorboard, etc.).
+runs/
+
+# Model and normalization artifacts produced by train.py + export_onnx.py.
+# Kept out of git so they can be regenerated deterministically.
+*.onnx
+*.pt
+*.pth
+normalization.json
+
+# Python build / cache.
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
