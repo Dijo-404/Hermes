@@ -88,7 +88,7 @@ class PSIPredictor {
     float threshold() const noexcept { return threshold_; }
 
     /* Process-wide singleton accessor.  Returns nullptr if
-     * `ro.lmk.use_ml_predictor` was false at startup, or before
+     * `persist.lmk.use_ml_predictor` was false at startup, or before
      * init_from_properties() has been called. Thread-safe. */
     static PSIPredictor* instance();
 
