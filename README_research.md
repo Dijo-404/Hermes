@@ -98,9 +98,10 @@ static-threshold decision tree, so:
 The PSI dispatch chain that delivers events to this hook is documented
 fully in `research/notes/phase1-callgraph.md` — kernel raises `EPOLLPRI`
 → main `epoll_wait` loop (`lmkd.cpp:3980` / `3995` / `4007`) →
-`call_handler` (`lmkd.cpp:3909`) → `mp_event_psi` (`lmkd.cpp:3117`,
-the thin shim) → `__mp_event_psi` (`lmkd.cpp:2713`, where the ML hook
-at 2936 sits) → `find_and_kill_process` (`lmkd.cpp:2539`).
+`call_handler` (`lmkd.cpp:3965`) → `mp_event_psi` (`lmkd.cpp:3173`,
+the thin shim that delegates at 3175) → `__mp_event_psi`
+(`lmkd.cpp:2717`, where the ML hook at 2936 sits) →
+`find_and_kill_process` (`lmkd.cpp:2539`).
 
 ## Reproduction Steps
 
@@ -294,7 +295,7 @@ see that file for the full anchor-by-anchor walk.
                                    │
                                    ▼
                 ┌─────────────────────────────────────┐
-                │ call_handler (lmkd.cpp:3909)        │
+                │ call_handler (lmkd.cpp:3965)        │
                 │   handler_info->handler(...)        │
                 │   resolves to mp_event_psi          │
                 └─────────────────────┬───────────────┘
@@ -308,7 +309,7 @@ see that file for the full anchor-by-anchor walk.
                                      │
                                      ▼
    ┌───────────────────────────────────────────────────────────────┐
-   │ __mp_event_psi  (lmkd.cpp:2713 — kill-decision body)          │
+   │ __mp_event_psi  (lmkd.cpp:2717 — kill-decision body)          │
    │                                                               │
    │   reads PSI/meminfo/vmstat, computes thrashing, picks         │
    │   min_score_adj …                                             │
@@ -391,7 +392,7 @@ device-verified result. Treat every quantitative claim below as
   existing static tree runs unchanged.
 
 - **`mp_event_psi` handler-installation is conditional on
-  `use_new_strategy`** (`lmkd.cpp:3393`). When that flag is false,
+  `use_new_strategy`** (set at `lmkd.cpp:3625`). When that flag is false,
   the PSI epoll slot routes to `mp_event_common` instead and the ML
   hook is never reached. Verify `use_new_strategy=true` on your
   target device before benching.
