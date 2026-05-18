@@ -81,6 +81,15 @@ LEAD_TIME_TARGET_MS: int = 100
 LEAD_TIME_TARGET_FRAC: float = 0.80
 SAMPLE_PERIOD_MS: int = 100           # collector cadence
 
+# How many steps before a labeled-positive run we still consider a
+# legitimate "early alarm" rather than a false positive. 5 steps at the
+# 100 ms collector cadence ≈ 500 ms — the spec's upper bound on useful
+# lead time (predictions earlier than this don't help lmkd avoid the OOM
+# and inflate the FP count without operational value). This same window
+# is honored by both `lead_time_ms_for_true_positives` and
+# `precision_recall`, keeping the two metrics consistent.
+EARLY_ALARM_LOOKBACK_STEPS: int = 5
+
 
 # ---------------------------------------------------------------------------
 # CLI.
@@ -145,16 +154,71 @@ class FoldResult:
     n_false_negatives: int
 
 
+def _positive_runs(labels: np.ndarray) -> list[tuple[int, int]]:
+    """Return list of [i, j) ranges where labels >= 0.5 contiguously."""
+    runs: list[tuple[int, int]] = []
+    n = len(labels)
+    i = 0
+    while i < n:
+        if labels[i] < 0.5:
+            i += 1
+            continue
+        j = i
+        while j < n and labels[j] >= 0.5:
+            j += 1
+        runs.append((i, j))
+        i = j
+    return runs
+
+
 def precision_recall(
-    probs: np.ndarray, labels: np.ndarray, threshold: float
+    probs: np.ndarray,
+    labels: np.ndarray,
+    threshold: float,
+    early_lookback_steps: int = EARLY_ALARM_LOOKBACK_STEPS,
 ) -> tuple[float, float, int, int, int]:
+    """
+    Compute precision / recall in a way that is *consistent* with
+    `lead_time_ms_for_true_positives`. A positive prediction at row `r`
+    counts as a true positive if `r` falls within an extended window
+    `[max(0, i - early_lookback_steps), j)` for some labeled-positive
+    run `[i, j)`. Early alarms inside that lookback (which buy us extra
+    lead time and are CREDITED by the lead-time metric) therefore do not
+    inflate the false-positive count.
+
+    Note: recall is still measured against the (unextended) labeled rows,
+    so we don't get free recall from the extension — only protection from
+    the spurious-FP miscount the original implementation suffered from.
+    """
     preds = (probs >= threshold).astype(np.int32)
     targets = (labels >= 0.5).astype(np.int32)
-    tp = int(((preds == 1) & (targets == 1)).sum())
-    fp = int(((preds == 1) & (targets == 0)).sum())
+    n = len(labels)
+
+    # Build the "credited" mask: rows that, if predicted positive, count
+    # toward TP rather than FP. This is the union of every labeled-positive
+    # run extended leftward by `early_lookback_steps`.
+    credited = np.zeros(n, dtype=bool)
+    for i, j in _positive_runs(labels):
+        start = max(0, i - early_lookback_steps)
+        credited[start:j] = True
+
+    pred_pos = preds == 1
+    # Precision-side TP: every credited prediction (including legitimate
+    # early alarms). Precision denom: tp + fp where fp = predictions outside
+    # any credited window.
+    tp = int((pred_pos & credited).sum())
+    fp = int((pred_pos & ~credited).sum())
+    # Recall-side denominator is the labeled-positive support, NOT the
+    # extended window — we don't want the lookback to give us free recall.
+    # FN = labeled rows we predicted negative. Recall numerator = labeled
+    # rows we DID predict positive (a subset of `tp`).
     fn = int(((preds == 0) & (targets == 1)).sum())
+    tp_labeled = int((pred_pos & (targets == 1)).sum())
+
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    recall = (
+        tp_labeled / (tp_labeled + fn) if (tp_labeled + fn) > 0 else 0.0
+    )
     return precision, recall, tp, fp, fn
 
 
@@ -163,6 +227,7 @@ def lead_time_ms_for_true_positives(
     labels: np.ndarray,
     threshold: float,
     sample_period_ms: int = SAMPLE_PERIOD_MS,
+    early_lookback_steps: int = EARLY_ALARM_LOOKBACK_STEPS,
 ) -> np.ndarray:
     """
     For each contiguous run of positive labels (corresponding to a single
@@ -174,32 +239,29 @@ def lead_time_ms_for_true_positives(
 
     The +100 ms reflects that even the *last* labelled-positive row sits
     100 ms before the kill instant (label.py defaults: lead=200, window=100).
+
+    We extend the search window leftward by `early_lookback_steps` rows so
+    that *better-than-labeled* lead times are credited rather than ignored.
+    This is matched by `precision_recall`, which treats predictions in the
+    same extended window as TPs rather than FPs — keeping the two metrics
+    consistent.
+
     Returns ms before kill for each detected positive run; runs we missed
     contribute nothing (they're counted as false negatives elsewhere).
     """
     leads: list[float] = []
-    n = len(labels)
-    i = 0
-    while i < n:
-        if labels[i] < 0.5:
-            i += 1
-            continue
-        # Found a positive run; find its bounds.
-        j = i
-        while j < n and labels[j] >= 0.5:
-            j += 1
-        # Positive run spans [i, j).
-        # First alarm within this run:
-        run_probs = probs[i:j]
+    for i, j in _positive_runs(labels):
+        start = max(0, i - early_lookback_steps)
+        # Search [start, j) for the earliest alarm.
+        run_probs = probs[start:j]
         alarm_offsets = np.where(run_probs >= threshold)[0]
         if alarm_offsets.size > 0:
-            first_alarm_idx = int(alarm_offsets[0])  # offset within run
-            # The LAST row of the run is at index (j - 1), which sits
-            # ~100 ms before T_k. The alarm at i+first_alarm_idx sits
-            # ((j - 1) - (i + first_alarm_idx)) * 100ms + 100ms before T_k.
-            lead_ms = (j - 1 - (i + first_alarm_idx)) * sample_period_ms + 100
+            first_alarm_idx = start + int(alarm_offsets[0])  # absolute idx
+            # The LAST row of the labeled run is at index (j - 1), which
+            # sits ~100 ms before T_k. The alarm at first_alarm_idx sits
+            # ((j - 1) - first_alarm_idx) * 100ms + 100ms before T_k.
+            lead_ms = (j - 1 - first_alarm_idx) * sample_period_ms + 100
             leads.append(float(lead_ms))
-        i = j
     return np.asarray(leads, dtype=np.float32)
 
 
@@ -270,8 +332,14 @@ def run_fold(
     train_ds.apply_stats(stats)
     val_ds.apply_stats(stats)
 
+    # Deterministic shuffle order across runs given the same seed.
+    train_gen = torch.Generator().manual_seed(args.seed)
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch, shuffle=True, drop_last=False
+        train_ds,
+        batch_size=args.batch,
+        shuffle=True,
+        drop_last=False,
+        generator=train_gen,
     )
     val_loader = DataLoader(
         val_ds, batch_size=args.batch, shuffle=False, drop_last=False
@@ -317,7 +385,14 @@ def train_final(
     ds = PSISeriesDataset(csv_path, scenarios=scenarios)
     stats = fit_stats(ds.raw_features())
     ds.apply_stats(stats)
-    loader = DataLoader(ds, batch_size=args.batch, shuffle=True, drop_last=False)
+    final_gen = torch.Generator().manual_seed(args.seed)
+    loader = DataLoader(
+        ds,
+        batch_size=args.batch,
+        shuffle=True,
+        drop_last=False,
+        generator=final_gen,
+    )
     model = PSIPredictor().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     pos_weight = torch.tensor([args.pos_weight], device=device)
@@ -532,9 +607,11 @@ def main() -> int:
         return 3
     assert pc <= PARAM_BUDGET, f"param count {pc} > {PARAM_BUDGET}"
 
-    # Save artifacts.
+    # Save artifacts. Use a temp-file + os.replace dance so a crash or
+    # disk-full mid-write can't leave a half-written .pt behind.
     try:
         ckpt_path = args.out_dir / "psi_predictor.pt"
+        ckpt_tmp = ckpt_path.with_suffix(ckpt_path.suffix + ".tmp")
         torch.save(
             {
                 "state_dict": final_model.state_dict(),
@@ -547,8 +624,9 @@ def main() -> int:
                 },
                 "param_count": pc,
             },
-            ckpt_path,
+            ckpt_tmp,
         )
+        os.replace(ckpt_tmp, ckpt_path)
         final_stats.to_json(args.out_dir / "normalization.json")
     except OSError as e:
         print(f"ERR: could not save artifacts: {e}", file=sys.stderr)

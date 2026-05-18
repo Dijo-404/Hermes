@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -103,7 +104,12 @@ class NormStats:
     std: np.ndarray   # shape [F]
 
     def to_json(self, path: Path) -> None:
-        path.write_text(
+        # Atomic write: serialize to <path>.tmp first, then os.replace so a
+        # crash mid-write can't leave a truncated sidecar that the C++
+        # inference loader would then refuse / mis-parse at runtime.
+        path = Path(path)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
             json.dumps(
                 {
                     "feature_order": list(self.feature_order),
@@ -113,6 +119,7 @@ class NormStats:
                 indent=2,
             )
         )
+        os.replace(tmp, path)
 
     @classmethod
     def from_json(cls, path: Path) -> "NormStats":
@@ -261,12 +268,14 @@ class PSISeriesDataset(Dataset):
             for row in reader:
                 scen = row["scenario"]
                 if scenarios_filter is not None and scen not in scenarios_filter:
-                    # Force a group break on filtered rows by resetting state.
-                    if current_scenario is not None and len(feats) > current_group_start:
-                        groups.append((current_group_start, len(feats)))
+                    # Filtered out — reset the per-group state so the next
+                    # accepted row will be detected as a scen_break and
+                    # start a fresh group. We don't flush here: the actual
+                    # group flush happens in the scen_break / gap_break
+                    # branch below (or in the trailing flush after the
+                    # loop), which avoids a redundant no-op append here.
                     current_scenario = None
                     last_ts = None
-                    current_group_start = len(feats)
                     continue
 
                 # Parse timestamp + feature row; tolerate empty cells (collector
@@ -295,6 +304,12 @@ class PSISeriesDataset(Dataset):
                         groups.append((current_group_start, len(feats)))
                     current_group_start = len(feats)
                     current_scenario = scen
+                    # On a scenario break the previous row's timestamp is
+                    # not comparable to this new run's timeline; null it
+                    # out so the first row of the new run can't trigger a
+                    # spurious cross-scenario gap_break next iteration.
+                    if scen_break:
+                        last_ts = None
                     if scen not in seen_set:
                         seen_set.add(scen)
                         seen_order.append(scen)
