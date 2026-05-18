@@ -52,7 +52,9 @@ end_ts=$(( $(date +%s) + DURATION ))
 i=0
 while (( $(date +%s) < end_ts )); do
     pkg="${PKGS[$(( i % ${#PKGS[@]} ))]}"
-    adb -s "${DEVICE}" shell "monkey -p ${pkg} -c android.intent.category.LAUNCHER 1" \
+    # Pass pkg as a separate argv element (no quoted remote-shell string)
+    # so the device-side shell never sees an interpolated package name.
+    adb -s "${DEVICE}" shell monkey -p "${pkg}" -c android.intent.category.LAUNCHER 1 \
         >/dev/null 2>&1 || true
     sleep "${DWELL_SEC}"
     i=$(( i + 1 ))

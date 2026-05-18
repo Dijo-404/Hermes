@@ -99,6 +99,20 @@ probe_coldstarts() {
 
 main() {
     parse_args "$@"
+
+    # Reap any background subprocesses if the collector is interrupted
+    # mid-run (SIGINT from a parent ab.sh, SIGTERM from a CI timeout).
+    # Variables are declared here so the trap closure can see them even
+    # if we exit before they are assigned a real PID.
+    local logcat_pid=""
+    local snapshot_pid=""
+    cleanup() {
+        kill "${logcat_pid:-}" 2>/dev/null || true
+        kill "${snapshot_pid:-}" 2>/dev/null || true
+        wait 2>/dev/null || true
+    }
+    trap cleanup EXIT INT TERM
+
     : > "${OUT}/meta.txt"
     echo "start_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${OUT}/meta.txt"
     echo "device=${DEVICE}"                          >> "${OUT}/meta.txt"
@@ -115,7 +129,7 @@ main() {
     log "starting logcat tail"
     adb -s "${DEVICE}" logcat -s lmkd:I lmkd-ml:I \
         > "${OUT}/lmkd.log" 2>"${OUT}/lmkd.logcat.stderr" &
-    local logcat_pid=$!
+    logcat_pid=$!
 
     # 4) Resolve lmkd pid for /proc/<pid>/status snapshots.
     local lmkd_pid

@@ -44,7 +44,9 @@ if [[ -z "${BENCH_GAME_PKG:-}" ]]; then
 fi
 
 echo "[game_load] starting ${BENCH_GAME_PKG} on ${DEVICE}"
-adb -s "${DEVICE}" shell "monkey -p ${BENCH_GAME_PKG} -c android.intent.category.LAUNCHER 1" \
+# Pass the package as a separate argv element so the device-side shell
+# never receives an interpolated package name inside a quoted string.
+adb -s "${DEVICE}" shell monkey -p "${BENCH_GAME_PKG}" -c android.intent.category.LAUNCHER 1 \
     >/dev/null 2>&1 || exit 2
 
 # Let the game allocate, then idle for the rest of the budget.

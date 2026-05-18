@@ -35,10 +35,10 @@
 
 namespace {
 
-constexpr const char* kPropUseML       = "ro.lmk.use_ml_predictor";
-constexpr const char* kPropModelPath   = "ro.lmk.ml_model_path";
-constexpr const char* kPropNormPath    = "ro.lmk.ml_norm_path";
-constexpr const char* kPropThreshold   = "ro.lmk.ml_threshold";
+constexpr const char* kPropUseML       = "persist.lmk.use_ml_predictor";
+constexpr const char* kPropModelPath   = "persist.lmk.ml_model_path";
+constexpr const char* kPropNormPath    = "persist.lmk.ml_norm_path";
+constexpr const char* kPropThreshold   = "persist.lmk.ml_threshold";
 
 constexpr const char* kDefaultModel = "/system/etc/lmkd/psi_predictor.onnx";
 constexpr const char* kDefaultNorm  = "/system/etc/lmkd/normalization.json";

@@ -73,34 +73,59 @@ class CI:
     high:   float
 
     def fmt(self, unit: str = "") -> str:
-        return f"{self.point:+.3f}{unit} (95% CI {self.low:+.3f}{unit} .. {self.high:+.3f}{unit})"
+        # Use a leading space inside the parens so unit-less calls don't
+        # collapse the gap, but never emit a doubled space when the
+        # caller passes a unit that already starts with whitespace.
+        u = unit if not unit or unit.startswith(" ") else f" {unit}"
+        return (
+            f"{self.point:+.3f}{u} "
+            f"(95% CI {self.low:+.3f}{u} .. {self.high:+.3f}{u})"
+        )
 
 
 def bootstrap_delta_ci(
-    on: np.ndarray,
-    off: np.ndarray,
+    on_df:  pd.DataFrame,
+    off_df: pd.DataFrame,
+    metric: str,
     n: int = BOOTSTRAP_N,
     ci: float = BOOTSTRAP_CI,
     seed: int = BOOTSTRAP_SEED,
 ) -> Optional[CI]:
-    """Bootstrap CI on mean(on) - mean(off). Returns None if any input empty."""
-    on = on[~np.isnan(on)]
-    off = off[~np.isnan(off)]
-    if on.size == 0 or off.size == 0:
+    """Paired bootstrap CI on mean(on[metric] - off[metric]) joined on `run`.
+
+    The two arms share the same `(workload, run)` keys (ab.sh emits both
+    arms for every run index), so the right statistic is the paired
+    delta — resampling the two arms independently would inflate the CI
+    by ignoring within-run correlation. We inner-join on `run`, build a
+    per-run delta array, and resample row indices with replacement.
+    """
+    if "run" not in on_df.columns or "run" not in off_df.columns:
         return None
+    a = on_df[["run", metric]].copy()
+    b = off_df[["run", metric]].copy()
+    a[metric] = pd.to_numeric(a[metric], errors="coerce")
+    b[metric] = pd.to_numeric(b[metric], errors="coerce")
+    merged = a.merge(b, on="run", suffixes=("_on", "_off"), how="inner")
+    merged = merged.dropna(subset=[f"{metric}_on", f"{metric}_off"])
+    if merged.empty:
+        return None
+    deltas_paired = (
+        merged[f"{metric}_on"].to_numpy(dtype=np.float64)
+        - merged[f"{metric}_off"].to_numpy(dtype=np.float64)
+    )
     rng = np.random.default_rng(seed)
-    point = float(on.mean() - off.mean())
-    deltas = np.empty(n, dtype=np.float64)
+    point = float(deltas_paired.mean())
+    boot = np.empty(n, dtype=np.float64)
+    nrows = deltas_paired.size
     for i in range(n):
-        s_on  = rng.choice(on,  size=on.size,  replace=True)
-        s_off = rng.choice(off, size=off.size, replace=True)
-        deltas[i] = s_on.mean() - s_off.mean()
+        idx = rng.integers(0, nrows, size=nrows)
+        boot[i] = deltas_paired[idx].mean()
     lo_q = (1.0 - ci) / 2.0
     hi_q = 1.0 - lo_q
     return CI(
         point=point,
-        low=float(np.quantile(deltas, lo_q)),
-        high=float(np.quantile(deltas, hi_q)),
+        low=float(np.quantile(boot, lo_q)),
+        high=float(np.quantile(boot, hi_q)),
     )
 
 
@@ -199,18 +224,14 @@ def render_workload_section(
         )
     lines.append("")
 
-    # Bootstrap CIs on the two headline deltas.
-    jank_ci = bootstrap_delta_ci(
-        pd.to_numeric(on_df["jank_pct"],  errors="coerce").to_numpy(dtype=np.float64),
-        pd.to_numeric(off_df["jank_pct"], errors="coerce").to_numpy(dtype=np.float64),
-    )
-    kills_ci = bootstrap_delta_ci(
-        pd.to_numeric(on_df["kills_per_hour"],  errors="coerce").to_numpy(dtype=np.float64),
-        pd.to_numeric(off_df["kills_per_hour"], errors="coerce").to_numpy(dtype=np.float64),
-    )
-    lines.append("**Bootstrap 95% CI on ml_on - ml_off (N=1000 resamples)**")
+    # Paired bootstrap CIs (joined by run index) on the two headline
+    # deltas. See bootstrap_delta_ci docstring for why the pairing
+    # matters.
+    jank_ci  = bootstrap_delta_ci(on_df, off_df, "jank_pct")
+    kills_ci = bootstrap_delta_ci(on_df, off_df, "kills_per_hour")
+    lines.append("**Paired bootstrap 95% CI on ml_on - ml_off (N=1000 resamples)**")
     lines.append("")
-    lines.append(f"- jank_pct delta       : {jank_ci.fmt(' pp') if jank_ci else 'n/a'}")
+    lines.append(f"- jank_pct delta       : {jank_ci.fmt('pp') if jank_ci else 'n/a'}")
     lines.append(f"- kills_per_hour delta : {kills_ci.fmt() if kills_ci else 'n/a'}")
     lines.append("")
 

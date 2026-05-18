@@ -23,8 +23,13 @@ research/bench/
 
 1. **Device.** Rooted Pixel 4a on AOSP `android-latest-release`, ADB
    reachable over USB (`adb devices` shows the serial). `adb root` must
-   succeed; the harness calls `setprop` for `ro.lmk.use_ml_predictor`
-   and `ro.lmk.ml_threshold`, both of which require root.
+   succeed; the harness calls `setprop` for `persist.lmk.use_ml_predictor`
+   and `persist.lmk.ml_threshold`, both of which require root. The
+   `persist.*` namespace (instead of the build-time `ro.lmk.*`) is
+   load-bearing: `ro.*` properties are immutable after boot on AOSP, so
+   `setprop` would have been a silent no-op. `persist.*` is writable at
+   runtime and additionally survives reboot, which is exactly what the
+   per-cell reboot loop needs.
 2. **Binary.** A single `lmkd` build with `LMKD_USE_ML=true` flashed
    to `/system/bin/lmkd`. The same binary is used in both A and B arms
    (per Phase 5 anti-pattern row 1, the baseline is the same build with
@@ -37,9 +42,9 @@ research/bench/
    adb push research/psi_norm.json      /system/etc/lmkd/psi_norm.json
    adb shell chmod 0644 /system/etc/lmkd/*
    ```
-   Properties `ro.lmk.ml_model_path` and `ro.lmk.ml_norm_path` should
-   point at the above (set in `/system/build.prop` or via
-   `resetprop -n`).
+   Properties `persist.lmk.ml_model_path` and `persist.lmk.ml_norm_path`
+   should point at the above (set via `setprop` once on the device; the
+   `persist.*` namespace survives reboots).
 4. **Host Python.** `pip install -r ../requirements.txt` — pulls
    `pandas` and `numpy` which the aggregator and analyzer need. No
    torch / onnxruntime needed on the host for Phase 5.
@@ -89,8 +94,8 @@ Per `(workload, run-index, ml ∈ {on, off})` cell:
    (90s timeout — Phase 5 anti-pattern row 2: PSI state carries
    across, so we reboot between every cell, not just between
    workloads).
-2. `setprop ro.lmk.use_ml_predictor true|false` and
-   `setprop ro.lmk.ml_threshold ${BENCH_ML_THRESHOLD:-0.65}`.
+2. `setprop persist.lmk.use_ml_predictor true|false` and
+   `setprop persist.lmk.ml_threshold ${BENCH_ML_THRESHOLD:-0.65}`.
    `stop lmkd; start lmkd` to pick up the toggle at startup.
 3. Run `coldstart_pre.txt` probes (5 cold starts via `am start -W`).
 4. Start `logcat -s lmkd:I lmkd-ml:I` redirecting into `lmkd.log`.
@@ -142,7 +147,7 @@ sub-second on the host.
 
 - **Anti-pattern row 1 — different binaries.** Do **not** compare the
   ML-enabled lmkd against an older or unmodified lmkd. Build once with
-  `LMKD_USE_ML=true`, flash once, flip `ro.lmk.use_ml_predictor`
+  `LMKD_USE_ML=true`, flash once, flip `persist.lmk.use_ml_predictor`
   between cells.
 - **Anti-pattern row 2 — same boot.** Do **not** run the on and off
   arms in the same boot. PSI counters and lmkd's internal rolling
@@ -152,10 +157,11 @@ sub-second on the host.
   pollutes the comparison.
 - **Charging state.** Keep the device plugged in. Thermal throttling
   shifts cold-start times and confounds the inference-latency gate.
-- **`ro.lmk.*` cached.** Some Android builds cache `ro.` properties at
-  init. If the toggle doesn't take effect, switch to `persist.lmk.*`
-  aliases (`ml_predictor.cpp` reads `ro.lmk.use_ml_predictor`; verify
-  the property actually flipped via `getprop` between cells).
+- **`persist.lmk.*` not picked up.** `ml_predictor.cpp` only reads the
+  property once per process at `init_from_properties()` time, so the
+  harness must `stop lmkd; start lmkd` (which `ab.sh` does) before the
+  flip takes effect. Verify via `adb shell getprop persist.lmk.use_ml_predictor`
+  between cells; the kPropUseML name in `ml_predictor.cpp` must match.
 - **Camera permissions.** `camera_burst.sh` assumes the camera app is
   pre-permissioned. First-run permission dialogs will block the
   workload silently.

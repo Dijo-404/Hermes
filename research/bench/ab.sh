@@ -6,8 +6,8 @@
 # -------
 # Drives a paired A/B comparison of an lmkd binary built with
 # LMKD_USE_ML=true against itself with the runtime property
-# `ro.lmk.use_ml_predictor` flipped between `true` (ml_on) and `false`
-# (ml_off). The same binary is used in both arms — per plan-executable.md
+# `persist.lmk.use_ml_predictor` flipped between `true` (ml_on) and
+# `false` (ml_off). The same binary is used in both arms — per plan-executable.md
 # Phase 5 anti-pattern row 1, the baseline must NOT be a different build.
 #
 # Each cell of the matrix (workload x runs x {ml_on, ml_off}) is run in a
@@ -35,7 +35,7 @@
 # Optional environment variables:
 #   BENCH_DURATION_SEC   per-workload duration in seconds (default 600).
 #   BENCH_REBOOT_TIMEOUT seconds to wait for sys.boot_completed (default 90).
-#   BENCH_ML_THRESHOLD   forwarded to ro.lmk.ml_threshold (default 0.65).
+#   BENCH_ML_THRESHOLD   forwarded to persist.lmk.ml_threshold (default 0.65).
 #   BENCH_GAME_PKG       package name for the game_load workload.
 #
 # Exit codes
@@ -147,10 +147,10 @@ set_ml_arm() {
         off) val="false" ;;
         *)   die 1 "internal: unknown arm '${arm}'" ;;
     esac
-    log "setting ro.lmk.use_ml_predictor=${val} ro.lmk.ml_threshold=${ML_THRESHOLD}"
+    log "setting persist.lmk.use_ml_predictor=${val} persist.lmk.ml_threshold=${ML_THRESHOLD}"
     adb -s "${DEVICE}" root >/dev/null 2>&1 || true
-    adb -s "${DEVICE}" shell "setprop ro.lmk.use_ml_predictor ${val}"
-    adb -s "${DEVICE}" shell "setprop ro.lmk.ml_threshold ${ML_THRESHOLD}"
+    adb -s "${DEVICE}" shell "setprop persist.lmk.use_ml_predictor ${val}"
+    adb -s "${DEVICE}" shell "setprop persist.lmk.ml_threshold ${ML_THRESHOLD}"
     # Restart lmkd so the new property is picked up at startup.
     adb -s "${DEVICE}" shell 'stop lmkd; start lmkd' || true
     sleep 2
@@ -163,6 +163,11 @@ run_cell() {
     local run_id="${workload}_ml_${arm}_${run_idx}"
     local cell_dir="${OUT_DIR}/${run_id}"
     mkdir -p "${cell_dir}"
+
+    # Ensure the background collector is reaped if ab.sh is interrupted
+    # between spawning collect_metrics.sh and `wait`.
+    local collect_pid=""
+    trap 'kill ${collect_pid:-} 2>/dev/null || true; wait 2>/dev/null || true' EXIT INT TERM
 
     local workload_sh="${WORKLOAD_DIR}/${workload}.sh"
     [[ -x "${workload_sh}" ]] || die 4 "missing workload script: ${workload_sh}"
@@ -192,7 +197,7 @@ EOF
         --out "${cell_dir}" \
         --duration "${DURATION_SEC}" \
         >"${cell_dir}/collect.stdout" 2>"${cell_dir}/collect.stderr" &
-    local collect_pid=$!
+    collect_pid=$!
 
     # Run the workload synchronously. The workload owns its own duration;
     # we pass the same DURATION_SEC so it stays inside the collection
@@ -212,6 +217,9 @@ EOF
     printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         > "${cell_dir}/finished_utc.txt"
     log "cell ${run_id} done"
+    # Collector has been waited on; drop the cleanup trap so it doesn't
+    # fire on normal function return.
+    trap - EXIT INT TERM
 }
 
 main() {
