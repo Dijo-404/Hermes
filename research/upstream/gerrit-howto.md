@@ -110,9 +110,8 @@ git push gerrit HEAD:refs/for/main
 ```
 
 If reviewers request changes spanning multiple commits in the series,
-use `git rebase -i origin/main` (interactive rebase is fine *locally*
-— it is not the disallowed Gerrit interactive mode) to edit each in
-turn, then push the whole series again.
+use `git rebase -i origin/main` locally to edit each in turn, then
+push the whole series again.
 
 ## What NOT to push
 
