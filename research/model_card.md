@@ -84,7 +84,7 @@ Closed-form breakdown:
 ## Intended use & limitations
 
 - Augments, does not replace, the static-threshold path in lmkd. When the
-  predicted probability is below `ro.lmk.ml_threshold` (default 0.65),
+  predicted probability is below `persist.lmk.ml_threshold` (default 0.65),
   control falls through to the existing PSI threshold logic.
 - Trained on a small set of synthetic / on-device workloads. Distribution
   shift across device classes is the largest known risk (plan.md §5,
