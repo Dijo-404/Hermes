@@ -24,6 +24,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <time.h>
@@ -46,14 +48,18 @@ constexpr const char* kOutputName = "kill_prob";
 
 constexpr int64_t kLatencyLogIntervalNs = 10LL * 1000 * 1000 * 1000;  // 10s
 
-PSIPredictor* g_instance = nullptr;
-bool          g_init_done = false;
-
 /* ---------------------------------------------------------------------- *
  * Minimal hand-rolled JSON parsing tailored to NormStats sidecar.        *
  *   {"feature_order": [...], "mean": [...], "std": [...]}                *
  * Robust enough for the canonical output of research/dataset.py but      *
  * not a general-purpose parser.                                          *
+ *                                                                        *
+ * Fragility note: extract_float_array assumes top-level keys with FLAT   *
+ * float arrays. Nested arrays (e.g. `[[1,2],[3,4]]`) would mis-parse —   *
+ * the body extractor stops at the first ']' after the key's '['. The     *
+ * canonical writer in research/dataset.py (NormStats.to_json) emits only *
+ * flat arrays so this is safe in practice; do not point this parser at   *
+ * arbitrary JSON.                                                        *
  * ---------------------------------------------------------------------- */
 
 bool extract_float_array(const std::string& s, const char* key,
@@ -102,7 +108,7 @@ PSIPredictor::PSIPredictor(const char* model_path, const char* norm_path,
     norm_std_.fill(1.0f);
 }
 
-bool PSIPredictor::ready() const {
+bool PSIPredictor::ready() const noexcept {
     return loaded_ && !fatal_ && ring_.size() == static_cast<size_t>(WINDOW);
 }
 
@@ -165,7 +171,7 @@ void PSIPredictor::ensure_loaded() {
 }
 
 void PSIPredictor::push_sample(float some_avg10, float some_avg60, float some_total,
-                               float full_avg10, float full_total, float mem_avail_kb) {
+                               float full_avg10, float full_total, float mem_avail_kb) noexcept {
     if (fatal_) return;
     if (!loaded_) {
         ensure_loaded();
@@ -187,7 +193,7 @@ void PSIPredictor::push_sample(float some_avg10, float some_avg60, float some_to
     ring_.push_back(normd);
 }
 
-float PSIPredictor::predict() {
+float PSIPredictor::predict() noexcept {
     if (!ready()) return -1.0f;
 
     /* Pack ring into [1, WINDOW, FEATURES] row-major. */
@@ -248,37 +254,54 @@ void PSIPredictor::maybe_log_latency() {
           latency_count_);
 }
 
+/*
+ * Singleton storage. The unique_ptr is a function-local static — zero-
+ * initialized at program start, populated (at most once) by call_once
+ * inside init_from_properties(), and destroyed at process exit which
+ * releases the Ort::Env and ONNX session. instance() returns the raw
+ * pointer; it is nullptr until init_from_properties() runs and stays
+ * nullptr if ML is disabled.
+ */
+namespace {
+std::once_flag g_init_flag;
+
+std::unique_ptr<PSIPredictor>& singleton_storage() {
+    static std::unique_ptr<PSIPredictor> instance_ptr;
+    return instance_ptr;
+}
+}  // namespace
+
 PSIPredictor* PSIPredictor::instance() {
-    return g_instance;
+    return singleton_storage().get();
 }
 
 void PSIPredictor::init_from_properties() {
-    if (g_init_done) return;
-    g_init_done = true;
+    std::call_once(g_init_flag, []() {
+        char buf[PROPERTY_VALUE_MAX];
 
-    char buf[PROPERTY_VALUE_MAX];
+        property_get(kPropUseML, buf, "false");
+        bool use_ml = (strcmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
+        if (!use_ml) {
+            ALOGI("ML predictor disabled via %s", kPropUseML);
+            return;
+        }
 
-    property_get(kPropUseML, buf, "false");
-    bool use_ml = (strcmp(buf, "true") == 0 || strcmp(buf, "1") == 0);
-    if (!use_ml) {
-        ALOGI("ML predictor disabled via %s", kPropUseML);
-        return;
-    }
+        char model_path[PROPERTY_VALUE_MAX];
+        char norm_path[PROPERTY_VALUE_MAX];
+        property_get(kPropModelPath, model_path, kDefaultModel);
+        property_get(kPropNormPath,  norm_path,  kDefaultNorm);
 
-    char model_path[PROPERTY_VALUE_MAX];
-    char norm_path[PROPERTY_VALUE_MAX];
-    property_get(kPropModelPath, model_path, kDefaultModel);
-    property_get(kPropNormPath,  norm_path,  kDefaultNorm);
+        property_get(kPropThreshold, buf, "");
+        float threshold = DEFAULT_KILL_THRESHOLD;
+        if (buf[0] != '\0') {
+            float t = std::strtof(buf, nullptr);
+            if (t > 0.0f && t < 1.0f) threshold = t;
+        }
 
-    property_get(kPropThreshold, buf, "");
-    float threshold = DEFAULT_KILL_THRESHOLD;
-    if (buf[0] != '\0') {
-        float t = std::strtof(buf, nullptr);
-        if (t > 0.0f && t < 1.0f) threshold = t;
-    }
-
-    g_instance = new PSIPredictor(model_path, norm_path, threshold);
-    ALOGI("ML predictor configured (model=%s norm=%s threshold=%.3f) — model "
-          "will be loaded lazily on first sample",
-          model_path, norm_path, threshold);
+        singleton_storage() = std::make_unique<PSIPredictor>(
+                model_path, norm_path, threshold);
+        ALOGI("ML predictor configured (model=%s norm=%s threshold=%.3f) — model "
+              "will be loaded lazily on first sample",
+              model_path, norm_path, threshold);
+    });
 }

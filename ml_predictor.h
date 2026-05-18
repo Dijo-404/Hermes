@@ -46,6 +46,19 @@
 
 #include <onnxruntime_cxx_api.h>
 
+/**
+ * @brief ONNX-Runtime backed PSI -> kill-probability predictor.
+ *
+ * Threading contract:
+ *   PSIPredictor is single-threaded by contract. lmkd's main loop is the
+ *   sole owner; instance methods (push_sample, predict, ready, threshold)
+ *   are NOT internally synchronized and must only be invoked from that
+ *   single thread. Construction via init_from_properties() happens once
+ *   at startup before the main loop begins; init_from_properties() itself
+ *   is idempotent and thread-safe (call_once semantics), but the predictor
+ *   it produces is not. instance() may be called from any thread, but
+ *   the returned pointer must only be dereferenced from the main loop.
+ */
 class PSIPredictor {
   public:
     static constexpr int WINDOW = 20;
@@ -63,23 +76,27 @@ class PSIPredictor {
     /* Append one raw (un-normalized) feature row.  Z-score normalization
      * is applied here so predict() stays branch-light. */
     void push_sample(float some_avg10, float some_avg60, float some_total,
-                     float full_avg10, float full_total, float mem_avail_kb);
+                     float full_avg10, float full_total, float mem_avail_kb) noexcept;
 
     /* Returns sigmoid output in [0,1], or -1.0f if not ready / fatal. */
-    float predict();
+    float predict() noexcept;
 
     /* True iff WINDOW samples have been accumulated since construction
      * and the model loaded successfully. */
-    bool ready() const;
+    bool ready() const noexcept;
 
-    float threshold() const { return threshold_; }
+    float threshold() const noexcept { return threshold_; }
 
     /* Process-wide singleton accessor.  Returns nullptr if
-     * `ro.lmk.use_ml_predictor` was false at startup. */
+     * `ro.lmk.use_ml_predictor` was false at startup, or before
+     * init_from_properties() has been called. Thread-safe. */
     static PSIPredictor* instance();
 
     /* Read system properties and (possibly) construct the singleton.
-     * Safe to call multiple times; subsequent calls are no-ops. */
+     * Idempotent: subsequent calls are no-ops (call_once semantics).
+     * The predictor's lifetime is managed by a function-local
+     * std::unique_ptr; it is destroyed at process exit, releasing the
+     * Ort::Env and ONNX session. */
     static void init_from_properties();
 
   private:
