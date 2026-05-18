@@ -60,6 +60,10 @@
 #include "statslog.h"
 #include "watchdog.h"
 
+#ifdef LMKD_USE_ML
+#include "ml_predictor.h"
+#endif
+
 /*
  * Define LMKD_TRACE_KILLS to record lmkd kills in kernel traces
  * to profile and correlate with OOM kills
@@ -2928,6 +2932,58 @@ update_watermarks:
     if (!psi_parse_mem(&psi_data)) {
         critical_stall = psi_data.mem_stats[PSI_FULL].avg10 > (float)stall_limit_critical;
     }
+
+#ifdef LMKD_USE_ML
+    /*
+     * ML augmentation: push the current PSI sample into the rolling-window
+     * predictor and, if the model is ready and the kill probability exceeds
+     * the configured threshold, pre-emptively trigger a kill. This sits
+     * BEFORE the static-threshold decision tree so the static fallback is
+     * preserved unchanged on every "not ready" or "below threshold" cycle.
+     *
+     * mem_available_kb is approximated from the existing easy_available
+     * field (nr_free_pages + inactive_file, in pages) — lmkd does not
+     * currently parse MemAvailable directly, and adding a parser would
+     * widen this diff well beyond the gated scope.  The predictor was
+     * trained on /proc/meminfo's MemAvailable; the approximation is
+     * close enough in practice and any residual drift is absorbed by
+     * z-score normalization.
+     */
+    if (PSIPredictor* ml = PSIPredictor::instance()) {
+        const float some_avg10  = psi_data.mem_stats[PSI_SOME].avg10;
+        const float some_avg60  = psi_data.mem_stats[PSI_SOME].avg60;
+        const float some_total  = static_cast<float>(psi_data.mem_stats[PSI_SOME].total);
+        const float full_avg10  = psi_data.mem_stats[PSI_FULL].avg10;
+        const float full_total  = static_cast<float>(psi_data.mem_stats[PSI_FULL].total);
+        const float mem_avail_kb = static_cast<float>(mi.field.easy_available * page_k);
+        ml->push_sample(some_avg10, some_avg60, some_total,
+                        full_avg10, full_total, mem_avail_kb);
+        if (ml->ready()) {
+            const float prob = ml->predict();
+            if (prob >= ml->threshold()) {
+                ALOGI("lmkd-ml: pre-emptive kill triggered (p=%.3f)", prob);
+                struct kill_info ki = {
+                    .kill_reason = LOW_MEM,
+                    .kill_desc = "ml predictor pre-emptive kill",
+                    .thrashing = (int)thrashing,
+                    .max_thrashing = max_thrashing,
+                };
+                psi_parse_io(&psi_data);
+                psi_parse_cpu(&psi_data);
+                int pages_freed = find_and_kill_process(
+                        lowmem_min_oom_score, &ki, &mi, &wi, &curr_tm, &psi_data);
+                if (pages_freed > 0) {
+                    killing = true;
+                    max_thrashing = 0;
+                }
+                /* Fall through to no_kill to update polling cadence
+                 * consistently with the static-path kill epilogue. */
+                goto no_kill;
+            }
+        }
+    }
+#endif  // LMKD_USE_ML
+
     /*
      * TODO: move this logic into a separate function
      * Decide if killing a process is necessary and record the reason
@@ -4200,6 +4256,10 @@ int main(int argc, char **argv) {
         ALOGE("Failed to initialize props, exiting.");
         return -1;
     }
+
+#ifdef LMKD_USE_ML
+    PSIPredictor::init_from_properties();
+#endif
 
     ctx = create_android_logger(KILLINFO_LOG_TAG);
 

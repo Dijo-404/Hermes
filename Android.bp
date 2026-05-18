@@ -35,6 +35,20 @@ cc_defaults {
     ],
 }
 
+// ML PSI predictor — disabled by default. Downstream OEMs flip
+// `enabled: true` (or layer their own cc_defaults override on top) to
+// pull in libonnxruntime and compile ml_predictor.cpp into lmkd. When
+// disabled, lmkd.cpp keeps every PSIPredictor reference behind
+// `#ifdef LMKD_USE_ML` so the resulting binary is byte-equivalent to a
+// build that never had this defaults block.
+cc_defaults {
+    name: "lmkd_ml_defaults",
+    enabled: false,
+    srcs: ["ml_predictor.cpp"],
+    shared_libs: ["libonnxruntime"],
+    cflags: ["-DLMKD_USE_ML"],
+}
+
 cc_binary {
     name: "lmkd",
 
@@ -69,6 +83,7 @@ cc_binary {
     defaults: [
         "stats_defaults",
         "lmkd_hooks_defaults",
+        "lmkd_ml_defaults",
     ],
     logtags: ["event.logtags"],
     afdo: true,
