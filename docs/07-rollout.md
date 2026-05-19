@@ -93,10 +93,12 @@ Lines you should expect to see, in order, after a successful boot:
    — emitted at the bottom of `init_from_properties()`.
 2. `lmkd-ml: model loaded (params=5153, opset=11)` — emitted by
    `ensure_loaded()` the first time `push_sample()` finishes loading.
-3. `lmkd-ml: pre-emptive kill triggered (p=0.872)` — emitted at
+3. `lmkd-ml: pre-emptive kill triggered (p=0.XXX)` — emitted at
    [`lmkd.cpp:2966`](../lmkd.cpp#L2966) on every pre-emptive fire.
-4. `lmkd-ml: inf p50=0.41ms p99=1.18ms (n=256)` — emitted by
+   (Format example; the runtime value is the actual sigmoid output.)
+4. `lmkd-ml: inf p50=X.XXms p99=Y.YYms (n=NNN)` — emitted by
    `maybe_log_latency()` every 10 s once enough samples have accumulated.
+   (Format example; values are measured per-run.)
 
 Quick health check (no model loaded, no kills triggered → fall-through path):
 
