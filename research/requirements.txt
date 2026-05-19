@@ -1,0 +1,12 @@
+# collector.py and label.py use stdlib only — no install required for them.
+# The EDA notebook (eda.ipynb) uses pandas + matplotlib for convenience.
+pandas>=2.0
+matplotlib>=3.7
+jupyter>=1.0
+
+# Phase 3 — model training + ONNX export.
+# model.py / dataset.py / train.py / export_onnx.py / bench_onnx.py.
+torch>=2.1
+onnx>=1.15
+onnxruntime>=1.17
+numpy
