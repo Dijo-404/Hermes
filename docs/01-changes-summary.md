@@ -12,7 +12,8 @@ byte-equivalent to upstream.
 ## File-by-file diff stat
 
 The numbers below come from `git diff main..HEAD --stat` on this branch
-(commit range `e867d32..63c0dc9`).
+(commit range `e867d32..HEAD`; see the commit-history section below for
+the full ordered list).
 
 ### Production code
 
@@ -59,7 +60,7 @@ The numbers below come from `git diff main..HEAD --stat` on this branch
 
 Total: 32 files, +5,497 lines.
 
-## Commit history (15 commits, grouped by phase)
+## Commit history (17 commits, grouped by phase)
 
 ```mermaid
 gitGraph
@@ -78,6 +79,8 @@ gitGraph
    commit id: "phase 6: correct lmkd.cpp line anchors, simplify rebase"
    commit id: "phase 6: simplify rebase note in gerrit-howto"
    commit id: "phase 6: fix stale ro.lmk.* doc comment in model_card.md"
+   commit id: "docs: add design + expected-performance documentation folder"
+   commit id: "docs: use placeholder convention for log-line examples"
 ```
 
 (Subjects are the exact `git log main..HEAD --oneline` output, lightly
